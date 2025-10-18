@@ -11,26 +11,62 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
 from pathlib import Path
+import environ
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
-BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
+
+env = environ.Env()
+environ.Env.read_env(BASE_DIR / ".env")
 
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = ""
+SECRET_KEY = env("DJANGO_SECRET_KEY", default="insecure")
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = env.bool("DJANGO_DEBUG", default=False)
 
-ALLOWED_HOSTS = []
+# DJANGO_ALLOWED_HOSTS 환경 변수가 없을 경우, DEBUG=True 일 때는 Django가 알아서 'localhost', '127.0.0.1'을 추가해줌.
+# 운영 환경(DEBUG=False)에서는 반드시 명시적으로 호스트를 설정해야 하므로, 기본값을 빈 리스트로 설정함.
+allowed_hosts_str = env("DJANGO_ALLOWED_HOSTS", default="")
+ALLOWED_HOSTS = [h.strip() for h in allowed_hosts_str.split(",") if h.strip()]
+
+
+# 신뢰된 오리진 목록 
+CSRF_TRUSTED_ORIGINS = [
+    "https://subway-info-easy.site",
+    "https://www.subway-info-easy.site",   # www 쓰면 함께
+]
+
+# 세션/CSRF 쿠키를 HTTPS 연결에서만 전송 
+SESSION_COOKIE_SECURE = True
+CSRF_COOKIE_SECURE = True
+
+
+# 실제 클라이언트가 HTTPS로 전송했음을 장고에게 알려주는 힌트 
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")  # 프록시가 이 헤더를 넣어줄 때
 
 
 # Application definition
 
-INSTALLED_APPS = [
+# Local Apps (직접 개발한 앱)
+LOCAL_APPS = [
+    "config.apps.arrivals",
+    "config.apps.accounts",
+]
+# Third-Party Apps (pip로 설치한 외부 앱)
+THIRD_PARTY_APPS = [
+    "allauth",
+    "allauth.account",
+    "allauth.socialaccount",
+    "allauth.socialaccount.providers.google",
+]
+# Django Apps (기본 내장 앱)
+DJANGO_APPS = [
+    "django.contrib.sites",
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -39,6 +75,50 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
 ]
 
+INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
+
+# 커스텀 유저 모델 선언
+AUTH_USER_MODEL = "accounts.User"
+
+AUTHENTICATION_BACKENDS = [
+    "django.contrib.auth.backends.ModelBackend", # django 기본 인증
+    "allauth.account.auth_backends.AuthenticationBackend", # allauth 추가
+]
+
+# --- allauth 설정 ---
+SITE_ID = 1
+
+# 로그인/로그아웃 후 이동
+LOGIN_REDIRECT_URL = "/"
+ACCOUNT_LOGOUT_REDIRECT_URL = "/"
+ACCOUNT_LOGOUT_ON_GET = True
+
+# allauth 기본 옵션 (원하면 조정)
+ACCOUNT_AUTHENTICATION_METHOD = "email"
+ACCOUNT_EMAIL_REQUIRED = True
+ACCOUNT_EMAIL_VERIFICATION = "none"  # 운영에서는 "mandatory" 권장
+
+# 중간 Continue 페이지 없애기
+SOCIALACCOUNT_LOGIN_ON_GET = True
+
+ACCOUNT_ADAPTER = 'config.adapters.MyAccountAdapter'
+SOCIALACCOUNT_ADAPTER = 'config.adapters.MySocialAccountAdapter'
+
+SOCIALACCOUNT_QUERY_EMAIL = True
+
+# 구글 로그인 프로바이더 설정
+SOCIALACCOUNT_PROVIDERS = {
+    "google": {
+        "SCOPE": ["profile", "email"],
+        "AUTH_PARAMS": {
+            "access_type": "online",
+            "prompt": "select_account",
+        },  # refresh_token 원하면 "offline"
+    }
+}
+# --- allauth 설정 끝 ---
+
+# 미들웨어
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -47,6 +127,7 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "allauth.account.middleware.AccountMiddleware",
 ]
 
 ROOT_URLCONF = "config.urls"
@@ -54,7 +135,9 @@ ROOT_URLCONF = "config.urls"
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [],
+        "DIRS": [
+            BASE_DIR / 'templates',
+        ],
         "APP_DIRS": True,
         "OPTIONS": {
             "context_processors": [
@@ -67,17 +150,14 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = "config.wsgi.application"
+ASGI_APPLICATION = "config.asgi.application"
 
 
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db.sqlite3",
-    }
-}
+# DB: local/prod에서 재정의
+DATABASES = {}
 
 
 # Password validation
@@ -102,9 +182,9 @@ AUTH_PASSWORD_VALIDATORS = [
 # Internationalization
 # https://docs.djangoproject.com/en/5.2/topics/i18n/
 
-LANGUAGE_CODE = "en-us"
+LANGUAGE_CODE = "ko-kr"
 
-TIME_ZONE = "UTC"
+TIME_ZONE = "Asia/Seoul"
 
 USE_I18N = True
 
@@ -115,6 +195,13 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATIC_URL = "static/"
+
+# 배포시 모든 정적 파일을 모을 경로
+STATIC_ROOT = BASE_DIR / "staticfiles"
+
+# 정적 파일을 찾을 경로
+STATICFILES_DIRS = [BASE_DIR / "static"]
+
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
