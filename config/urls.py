@@ -19,7 +19,8 @@ from django.urls import path, include
 
 urlpatterns = [
     path("admin/", admin.site.urls),
-    path("accounts/", include("config.apps.accounts.urls")),
     path("", include("config.apps.arrivals.urls")),
-    path("accounts/", include("allauth.urls")),  # /accounts/google/login/ 등
+    # /accounts/profile/ 은 accounts.urls 에서, /accounts/login/ 등은 allauth.urls 에서 처리
+    path("accounts/", include("config.apps.accounts.urls")),
+    path("accounts/", include("allauth.urls")),
 ]
