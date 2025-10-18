@@ -50,9 +50,12 @@ class Command(BaseCommand):
             self.stdout.write(self.style.WARNING("GOOGLE_CLIENT_* not set"))
             return
 
-        # 4) Google용 SocialApp을 가져오거나 없으면 새로 생성합니다.
-        # provider="google"로 식별, name="Google"로 표시
-        app, _ = SocialApp.objects.get_or_create(provider="google", name="Google")
+        # 4) Google용 SocialApp을 가져오거나 없으면 새로 생성합니다. (더 안정적인 방식)
+        # provider='google'을 기준으로 조회하고, 없으면 name='Google'로 생성합니다.
+        # 이렇게 하면 name 필드의 대소문자 차이 등으로 인한 중복 생성을 방지할 수 있습니다.
+        app, created = SocialApp.objects.get_or_create(
+            provider="google", defaults={"name": "Google"}
+        )
 
         # 환경변수에서 읽은 값으로 client_id/secret 갱신
         app.client_id = client_id
