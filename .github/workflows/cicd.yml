@@ -1,0 +1,447 @@
+name: Full CI/CD - Lint, Build, Push, and Deploy (Nginx + Django + MySQL)
+
+# --------------- triggers ---------------------------------------------
+
+on:
+  push:
+    branches:
+      - master      
+
+# --------------- /triggers ---------------------------------------------
+
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      # --------------- checkout ----------------------------------------
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ github.token }}
+          ref: ${{ github.event_name == 'push' && github.head_ref || github.ref }}
+      # ---------------/checkout ----------------------------------------
+
+      #-------------Lint:Ruff-------------
+      # (임시 주석처리 - 추후 ci.yml / cd.yml 분리 시 복구)
+      # # Python 3.11 (ruff 등 도구 실행용)
+      # - uses: actions/setup-python@v5
+      #   with:
+      #     python-version: "3.11"
+      #     cache: "pip"
+
+      # # Ruff 설치
+      # - name: Install Ruff
+      #   run: |
+      #     python -m pip install --upgrade pip
+      #     pip install ruff
+
+      # # Ruff: check-only 모드 (자동수정/푸시 없음 → 루프 방지)
+      # #  - 위반사항이 있으면 non-zero로 실패 처리
+      # - name: Run Ruff (check-only; no auto-fix)
+      #   if: ${{ github.actor != 'github-actions[bot]' }}   # 루프 방지 추가 안전장치
+      #   run: |
+      #     ruff check --diff .
+      #     ruff format --check .
+      #-------------/Lint:Ruff-------------
+
+
+      #-------------Build-------------
+
+      #-------------Build:buildx-------------
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      #-------------/Build:buildx-------------
+
+
+
+      #-------------Build:registry-login-------------
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      #-------------/Build:registry-login-------------
+          
+        
+      #-------------Build:build_n_push-------------
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/wishfast:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/wishfast:sha-${{ github.sha }}
+          
+      #-------------/Build:build_n_push-------------
+  #-------------/Build-------------
+
+  #-------------Deploy-------------
+  deploy:
+    needs: build-and-push
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to EC2 with Docker Compose (nginx + web)
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -Eeuo pipefail
+
+            # -----------deploy:prep---------
+            # -p 명령어(폴더가 없으면 만들고, 있어도 실패 안함)를 통해, 다음 단계에서 필요한 폴더 구조가 확실하게 존재하도록 보장
+            APP_DIR="/home/ubuntu/wishfast"
+            mkdir -p "$APP_DIR/nginx/conf.d"
+            cd "$APP_DIR"
+            # ----------/deploy:prep---------
+
+            # -----------deploy:env---------
+            # .env 파일 재생성, -f 명령어를 통해 파일 존재여부와 관계없이 삭제를 (안전하게 == 실패 안하게)보장하려고 함.
+            rm -f .env
+            # 아래 명령어를 통해 스크립트 내에서 환경 변수와 같은 여러 줄의 데이터를 파일(.env)로 만들 수 있음 
+            cat > .env << 'EOF'
+
+            DJANGO_SECRET_KEY=${{ secrets.DJANGO_SECRET_KEY }}
+            DJANGO_DEBUG=${{ secrets.DJANGO_DEBUG}}
+            DJANGO_ALLOWED_HOSTS=${{ secrets.DJANGO_ALLOWED_HOSTS }}
+            
+            # RDS 연결 정보
+            DB_HOST=${{ secrets.RDS_HOST }}
+            MYSQL_DATABASE=${{ secrets.RDS_DB_NAME }}
+            MYSQL_USER=${{ secrets.RDS_USER }}
+            MYSQL_PASSWORD=${{ secrets.RDS_PASSWORD }}
+            
+            DOCKERHUB_IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/wishfast
+            IMAGE_TAG=sha-${{ github.sha }}
+            
+            GOOGLE_CLIENT_ID=${{ secrets.GOOGLE_CLIENT_ID }}
+            GOOGLE_CLIENT_SECRET=${{ secrets.GOOGLE_CLIENT_SECRET }}
+
+            SITE_DOMAIN=${{ secrets.SITE_DOMAIN }}
+
+            SEOUL_SUBWAY_API_KEY=${{ secrets.SEOUL_SUBWAY_API_KEY }}
+
+            EOF
+            
+            # ----------/deploy:env---------
+
+            # -----------deploy:docker-ensure---------
+            # Docker/Compose 보장
+            # 1) Docker CE 설치 여부 확인, 없으면 설치
+            # 2) Docker 서비스 활성화
+            # 3) docker compose 설치 여부 확인, 없으면 설치
+
+            # Docker 설치 여부 확인
+            if ! command -v docker >/dev/null 2>&1; then
+              echo "[deploy:docker-ensure] Docker CE 설치되어 있지 않습니다. 설치하겠습니다..."
+              # Docker CE 설치 없을 때 설치 - 기존에 수동으로 하는 법을 정리해놨는데, 그것을 CI-CD로도 자동화하겠습니다. 아래 코드가 궁금하다면 정현쓰 티스토리 참고하세요
+              sudo apt-get update
+              sudo apt-get install -y ca-certificates curl gnupg lsb-release
+
+              sudo mkdir -p /etc/apt/keyrings
+              curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
+                sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+              sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+              echo \
+                "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+                https://download.docker.com/linux/ubuntu \
+                $(lsb_release -cs) stable" | \
+                sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+              sudo apt-get update
+              sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+            else
+              echo "[deploy:docker-ensure] Docker CE 설치되어 있습니다."
+            fi
+
+            # 도커 서비스가 부팅 시 자동으로 시작되도록 설정하고 즉시 시작하게
+            sudo systemctl enable --now docker
+            sudo docker version || (echo "[deploy:docker-ensure] Docker 데몬이 실행 중이 아닙니다" && exit 1)
+
+            # docker compose를 사용해서 배포할 예정이기 때문에, docker-compose 설치 확인
+            if ! sudo docker compose version >/dev/null 2>&1; then
+              echo "[deploy:docker-ensure] docker-compose 플러그인 설치하겠습니다..."
+              sudo apt-get update -y
+              sudo apt-get install -y docker-compose-plugin
+            else
+              echo "[deploy:docker-ensure] docker compose 사용 가능합니다. 설치 진행하지 않겠습니다."
+            fi
+
+            # Hub 로그인
+            if [ -n "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
+              echo "${{ secrets.DOCKERHUB_TOKEN }}" | sudo docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+            fi
+
+            # 네트워크 생성 - 야멜 파일 안에 정의된 컨테이너 들이 appnet에 연결되어, 서로 다른 컨테이너 들이 통신할 수 있게 만들어줍니다. 반대로 appnet 네트워크에 속하지 않은 다른 컨테이너들과는 격리되어 보안은 강화됩니다.
+            sudo docker network create appnet || true
+            # ----------/deploy:docker-ensure---------
+
+            # -----------deploy:nginx-conf---------
+            # nginx conf (HTTP→HTTPS 리다이렉트 + 프록시) 
+            # 목적: 80 포트는 443으로 리다이렉트 강제, 443은 web:8000으로 프록시
+            # 즉, 80(hhtp), 443(https)로 사용자의 요청이 오면, nginx컨테이너로 전달하고, 이후 들어온 요청을 실제 웹앱이 있는 컨테이너로 전달한다.
+            # Nginx 가 읽을 서버 설정 파일을 nginx/conf.d/default.conf 경로에 생성
+            cat > nginx/conf.d/default.conf << 'EOF'
+            server {
+              listen 80;
+              server_name subway-info-easy.site;
+              return 301 https://$host$request_uri;
+            }
+
+            server {
+              listen 443 ssl http2;
+              server_name subway-info-easy.site;
+
+              ssl_certificate /etc/letsencrypt/live/subway-info-easy.site/fullchain.pem;
+              ssl_certificate_key /etc/letsencrypt/live/subway-info-easy.site/privkey.pem;
+
+              ssl_session_timeout 1d;
+              ssl_session_cache shared:MozSSL:10m;
+              ssl_session_tickets off;
+              ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+              add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+
+              location /static/ {
+                alias /wishfast/staticfiles/;
+                try_files $uri $uri/ =404;
+              }
+
+              location / {
+                proxy_pass http://web:8000;
+                proxy_http_version 1.1;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+              }
+            }
+            EOF
+            # ----------/deploy:nginx-conf---------
+
+            # -----------deploy:compose-file---------
+            cat > docker-compose.prod.yml << 'EOF'
+            services:
+              web:
+                image: "${DOCKERHUB_IMAGE}:${IMAGE_TAG}"
+                container_name: wishfast_web
+                restart: always
+                env_file: .env
+                environment:
+                  SECRET_KEY: ${DJANGO_SECRET_KEY}
+                  DJANGO_DEBUG: ${DJANGO_DEBUG}
+                  DB_HOST: ${DB_HOST}
+                  DB_PORT: "3306"
+                  MYSQL_DATABASE: ${MYSQL_DATABASE}
+                  MYSQL_USER: ${MYSQL_USER}
+                  MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+                  DJANGO_SETTINGS_MODULE: config.settings.prod
+                  GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+                  GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+                  SITE_DOMAIN: ${SITE_DOMAIN}
+                volumes:
+                  - ./staticfiles:/wishfast/staticfiles
+                  - ./logs:/wishfast/logs
+                networks: [appnet]
+                expose:
+                  - "8000"
+                command: >
+                  sh -lc "
+                  gunicorn config.wsgi:application
+                  --bind 0.0.0.0:8000
+                  --access-logfile /wishfast/logs/gunicorn_access.log
+                  --error-logfile /wishfast/logs/gunicorn_error.log
+                  --log-level debug
+                  "
+
+              nginx:
+                image: nginx:1.27-alpine
+                container_name: nginx_edge
+                restart: always
+                depends_on:
+                  - web
+                ports:
+                  - "80:80"
+                  - "443:443"
+                volumes:
+                  - ./nginx/conf.d:/etc/nginx/conf.d:ro
+                  - /etc/letsencrypt:/etc/letsencrypt:ro
+                  - ./staticfiles:/wishfast/staticfiles:ro
+                networks: [appnet]
+
+            networks:
+              appnet:
+                external: true
+            EOF
+            # ----------/deploy:compose-file---------
+
+            # -----------deploy:compose-up---------
+            # 최신 이미지 pull & 컨테이너 기동
+            sudo docker compose -f docker-compose.prod.yml pull web
+            sudo docker compose -f docker-compose.prod.yml ps
+            # ----------/deploy:compose-up---------
+
+            # -----------deploy:migrate-and-static---------
+            # 배포 단계 중 migrate와 collectstatic 작업이 수행되는 부분
+            # 목적: Django 프로젝트의 데이터베이스 스키마를 최신 상태로 동기화하고,
+            #       정적 파일을 모아 Nginx가 서비스할 수 있도록 준비하는 단계입니다.
+            #       (== 웹앱이 실제로 뜨기 전에 내부 구조와 자산을 세팅하는 작업)
+            echo "[deploy:migrate-and-static] Django migrate과 collectstatic 수행하겠습니다."
+            # ? 왜 웹앱(Gunicorn)이 뜨기 전에 migrate를 하나요?
+            #  └ manage.py migrate 명령은 웹 서버(gunicorn) 실행과 무관하게, 
+            #    Django ORM을 통해 직접 DB에 접속하여 스키마를 적용
+            #  └ 즉, DB만 살아있으면 (웹앱이 뜨기 전이라도) 독립적으로 실행 가능
+            #  └ 이렇게 하면 웹 서버가 DB 미준비 상태에서 오류로 죽는 상황을 예방할 수 있음
+            # 도커 컨테이너 안에서, 실행 대상인 컨테이너 이름에 대해서, 환경 변수 로드해서 뒤의 문자열을 명령으로 실행하라.
+            # `docker compose run --rm`을 사용하면, 서비스(web) 컨테이너가 아직 실행 중이 아니더라도
+            # 이미지 기반으로 일회성 컨테이너를 생성하여 내부 명령을 실행할 수 있음
+            # RDS는 외부에서 이미 실행 중이므로, 이 일회성 컨테이너는 RDS에 바로 접속하여
+            # 마이그레이션 등의 작업을 수행
+            
+            # (1) DB 마이그레이션: 이미 만들어진 테이블이 있어도 기록만 맞추도록 안전장치 포함
+            sudo docker compose -f docker-compose.prod.yml run --rm web sh -lc "
+              echo '[deploy:migrate-and-static] (1/3) DB 마이그레이션 시작...';
+              # RDS에 연결하기 위해 잠시 대기 (네트워크 지연 등 고려)
+              echo '[deploy:migrate-and-static] RDS 연결을 위해 5초 대기...';
+              sleep 5;
+              python manage.py migrate --noinput --settings=config.settings.prod || \
+              python manage.py migrate --fake-initial --noinput --settings=config.settings.prod;
+              echo '[deploy:migrate-and-static] (1/3) DB 마이그레이션 완료';
+            "
+
+            # (2) Google SocialApp 적용
+            sudo docker compose -f docker-compose.prod.yml run --rm web sh -lc "
+              set -Eeuo pipefail
+              echo '[deploy:apply-socialapp] (2/3) Django Site 도메인 업데이트...';
+              python manage.py shell --settings=config.settings.prod -c \
+              'from django.contrib.sites.models import Site; s,_=Site.objects.get_or_create(id=1); s.domain=\"subway-info-easy.site\"; s.name=\"subway-info-easy.site\"; s.save(); print(s.id, s.domain)'
+
+              echo '[deploy:apply-socialapp] (2/3) Google SocialApp 적용 시작...';
+              python manage.py apply_socialapp --settings=config.settings.prod;
+              echo '[deploy:apply-socialapp] (2/3) Google SocialApp 적용 완료';
+            "
+
+            # (3) 정적 파일 수집
+            sudo docker compose -f docker-compose.prod.yml run --rm web sh -lc "
+              echo '[deploy:migrate-and-static] (3/3) 정적 파일 수집 시작...';
+              python manage.py collectstatic --noinput --settings=config.settings.prod;
+              echo '[deploy:migrate-and-static] (3/3) 정적 파일 수집 완료';
+            "
+
+            echo "[deploy:migrate-and-static] 완료되었습니다."
+            # -----------/deploy:migrate-and-static---------
+
+            # -----------deploy:start web & nginx---------
+            sudo docker compose -f docker-compose.prod.yml up -d web nginx
+            sudo docker compose -f docker-compose.prod.yml ps
+            echo "[deploy:done] 배포 완료"
+            # ----------/deploy:start---------
+
+
+
+  #-------------/Deploy-------------
+
+
+  #-------------Cleanup-------------
+  cleanup:
+    # 배포 완료 후 실행
+    needs: deploy          
+    # push 이벤트에서만 실행
+    if: ${{ github.event_name == 'push' }}  
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cleanup old Docker images on EC2 (retain last 3)
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -Eeuo pipefail
+            echo "[cleanup] 오래된 Docker 이미지를 정리합니다."
+            REPO="${{ secrets.DOCKERHUB_USERNAME }}/wishfast"
+            KEEP_N=3
+
+
+            # 1) 현재 실행 중인 이미지 확인
+            # - docker ps -a: 실행 중이거나 종료된 모든 컨테이너 리스트 출력
+            # - --format '{{.Image}}': 컨테이너가 어떤 이미지를 사용하는지 표시
+            # - sort -u: 중복 제거
+            # - mapfile -t: bash 배열(IN_USE[])로 저장 (각 요소가 한 이미지 이름)
+            echo "[cleanup] 1. 실행 중인 컨테이너 이미지를 수집합니다."
+            mapfile -t IN_USE <<< "$(sudo docker ps -a --format '{{.Image}}' | sort -u)"
+
+            # 2) 레포에서 최근 생성된 sha 이미지 N개를 추려서 보존 리스트에 추가
+            # - docker images --format: 이미지 이름(tag) + 생성일을 한 줄로 출력
+            # - awk -v r="$REPO": wishfast 레포 내 sha-태그만 필터링
+            # - sort -rk2: 생성일 기준 내림차순 정렬 (가장 최근 것이 위로)
+            # - head -n "$KEEP_N": 최근 N개만 남기기
+            # - awk '{print $1}': 이미지 이름만 추출 → KEEP_SHA[] 배열에 저장
+            echo "[cleanup] 2. 최근 ${KEEP_N}개의 sha 이미지를 보호 대상에 추가합니다."
+            mapfile -t KEEP_SHA <<< "$(
+              sudo docker images --format '{{.Repository}}:{{.Tag}} {{.CreatedAt}}' \
+              | awk -v r="$REPO" '$1 ~ r":sha-" {print $1, $2" "$3" "$4" "$5" "$6}' \
+              | sort -rk2 \
+              | head -n "$KEEP_N" \
+              | awk '{print $1}'
+            )"
+
+            # 3) wishfast 레포의 모든 sha-이미지 목록을 가져옴
+            # ALL_SHA[] = wishfast 레포에 존재하는 모든 sha 이미지 태그 목록
+            mapfile -t ALL_SHA <<< "$(
+              sudo docker images --format '{{.Repository}}:{{.Tag}}' \
+              | awk -v r="$REPO" '$1 ~ r":sha-" {print $1}'
+            )"
+
+            # 4) atest 이미지가 있으면 보호 리스트에 추가
+            PROTECT_LIST=("${KEEP_SHA[@]}")
+            if sudo docker images --format '{{.Repository}}:{{.Tag}}' | grep -q "^${REPO}:latest$"; then
+              PROTECT_LIST+=("${REPO}:latest")
+            fi
+
+            # 5) 삭제할 후보 찾기
+            # -1- 보호 리스트에 있으면 스킵
+            # -2- 현재 실행 중인 컨테이너가 사용하는 이미지면 스킵
+            DELETE_LIST=()
+            for img in "${ALL_SHA[@]}"; do
+              if printf '%s\n' "${PROTECT_LIST[@]}" | grep -qx "$img"; then
+                continue
+              fi
+              if printf '%s\n' "${IN_USE[@]}" | grep -qx "$img"; then
+                continue
+              fi
+              DELETE_LIST+=("$img")
+            done
+
+            # 6) 삭제 실행
+            # - docker rmi -f: 이미지를 강제 삭제 
+            # - || true: 삭제 중 에러가 나도 스크립트가 중단되지 않게 함
+            if [ "${#DELETE_LIST[@]}" -gt 0 ]; then
+              echo "[cleanup] 6. 오래된 이미지를 ${#DELETE_LIST[@]}개 삭제합니다:"
+              printf '  - %s\n' "${DELETE_LIST[@]}"
+              for img in "${DELETE_LIST[@]}"; do
+                sudo docker rmi -f "$img" || true
+              done
+            else
+              echo "[cleanup] 6. 삭제할 이미지가 없습니다."
+            fi
+
+            # 7) 추가적인 정리 dangling 이미지 및 빌드 캐시 정리
+            # -f: “Are you sure?” 물어보지 말고 바로 실행
+            # || true: 실패해도 스크립트 중단 X
+            echo "[cleanup] + 태그 없는 이미지를 정리합니다."
+            sudo docker image prune -f || true
+            # docker builder prune: Docker 빌드 캐시 정리
+            # 빌드 속도 향상을 위해 남겨둔 중간 결과를 삭제
+            # 이미지나 컨테이너엔 영향 없음  
+            echo "[cleanup] + 빌드 캐시를 정리합니다."
+            sudo docker builder prune -f || true
+
+            echo "[cleanup] 완료되었습니다. 최근 ${KEEP_N}개 이미지만 유지 중입니다."
+
+  #-------------/Cleanup-------------
