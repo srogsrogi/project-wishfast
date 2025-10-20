@@ -111,15 +111,13 @@ jobs:
             cat > .env << 'EOF'
 
             DJANGO_SECRET_KEY=${{ secrets.DJANGO_SECRET_KEY }}
-            DJANGO_DEBUG=${{ secrets.DJANGO_DEBUG}}
+            DJANGO_DEBUG=${{ secrets.DJANGO_DEBUG }}
             DJANGO_ALLOWED_HOSTS=${{ secrets.DJANGO_ALLOWED_HOSTS }}
             
-            # RDS 연결 정보
             DB_HOST=${{ secrets.RDS_HOST }}
             MYSQL_DATABASE=${{ secrets.RDS_DB_NAME }}
             MYSQL_USER=${{ secrets.RDS_USER }}
             MYSQL_PASSWORD=${{ secrets.RDS_PASSWORD }}
-            
             DOCKERHUB_IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/wishfast
             IMAGE_TAG=sha-${{ github.sha }}
             
@@ -134,7 +132,9 @@ jobs:
             
             # .env 파일의 변수들을 현재 셸 환경으로 export
             # 이래야 nginx.conf 생성 시 ${SITE_DOMAIN} 변수를 사용할 수 있음
-            export $(cat .env | xargs)
+            set -a
+            . ./.env
+            set +a
 
             # ----------/deploy:env---------
 
@@ -218,7 +218,7 @@ jobs:
 
               location /static/ {
                 alias /wishfast/staticfiles/;
-                try_files $uri $uri/ =404;
+                try_files \$uri \$uri/ =404;
               }
 
               location / {
