@@ -4,7 +4,7 @@ name: Full CI/CD - Lint, Build, Push, and Deploy (Nginx + Django + MySQL)
 on:
   push:
     branches:
-      - master      
+      - master
 # --------------- /triggers ---------------------------------------------
 
 # 중복 실행 방지
